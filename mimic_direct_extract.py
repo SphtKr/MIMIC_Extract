@@ -216,7 +216,7 @@ def range_unnest(df, col, out_col_name=None, reset_index=False):
     if out_col_name is None: out_col_name = col
 
     col_flat = pd.DataFrame(
-        [[i, x] for i, y in df[col].iteritems() for x in range(y+1)],
+        [[i, x] for i, y in df[col].items() for x in range(y+1)],
         columns=[df.index.names[0], out_col_name]
     )
 
