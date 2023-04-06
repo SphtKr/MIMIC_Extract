@@ -12,6 +12,7 @@ import pickle as cPickle
 import numpy.random as npr
 
 import spacy
+from spacy.language import Language
 # TODO(mmd): Upgrade to python 3 and use scispacy (requires python 3.6)
 import scispacy
 
@@ -146,8 +147,8 @@ def save_pop(
 def get_variable_mapping(mimic_mapping_filename):
     # Read in the second level mapping of the itemids
     var_map = pd.read_csv(mimic_mapping_filename, index_col=None)
-    var_map = var_map.ix[(var_map['LEVEL2'] != '') & (var_map['COUNT']>0)]
-    var_map = var_map.ix[(var_map['STATUS'] == 'ready')]
+    var_map = var_map.loc[(var_map['LEVEL2'] != '') & (var_map['COUNT']>0)]
+    var_map = var_map.loc[(var_map['STATUS'] == 'ready')]
     var_map['ITEMID'] = var_map['ITEMID'].astype(int)
 
     return var_map
@@ -231,12 +232,12 @@ def save_numerics(
 
     var_map = var_map[
         ['LEVEL2', 'ITEMID', 'LEVEL1']
-    ].rename_axis(
+    ].rename( # Less sure about this change
         {'LEVEL2': 'LEVEL2', 'LEVEL1': 'LEVEL1', 'ITEMID': 'itemid'}, axis=1
     ).set_index('itemid')
 
     X['value'] = pd.to_numeric(X['value'], 'coerce')
-    X.astype({k: int for k in ID_COLS}, inplace=True)
+    X = X.astype({k: int for k in ID_COLS})
 
     to_hours = lambda x: max(0, x.days*24 + x.seconds // 3600)
 
@@ -255,7 +256,7 @@ def save_numerics(
         X = apply_variable_limits(X, var_ranges, 'LEVEL2')
 
     group_item_cols = ['LEVEL2'] if group_by_level2 else ITEM_COLS
-    X = X.groupby(ID_COLS + group_item_cols + ['hours_in']).agg(['mean', 'std', 'count'])
+    X = X.groupby(ID_COLS + group_item_cols + ['hours_in']).agg(['mean', 'std', 'count']) #FutureWarning: ['valueuom', 'dbsource', 'linksto', 'category', 'unitname'] did not aggregate successfully. If any error is raised this will raise in a future version of pandas. Drop these columns/ops to avoid this warning.
     X.columns = X.columns.droplevel(0)
     X.columns.names = ['Aggregation Function']
 
@@ -300,9 +301,9 @@ def save_numerics(
 
     # Get the max time for each of the subjects so we can reconstruct!
     if subjects_filename is not None:
-        np.save(os.path.join(outPath, subjects_filename), data['subject_id'].as_matrix())
+        np.save(os.path.join(outPath, subjects_filename), data['subject_id'].to_numpy())
     if times_filename is not None: 
-        np.save(os.path.join(outPath, times_filename), data['max_hours'].as_matrix())
+        np.save(os.path.join(outPath, times_filename), data['max_hours'].to_numpy())
 
     #fix nan in count to be zero
     idx = pd.IndexSlice
@@ -321,7 +322,7 @@ def save_numerics(
     X = X.drop(columns = drop_col)
 
     ########
-    if dynamic_filename is not None: np.save(os.path.join(outPath, dynamic_filename), X.as_matrix())
+    if dynamic_filename is not None: np.save(os.path.join(outPath, dynamic_filename), X.to_numpy())
     if dynamic_hd5_filename is not None: X.to_hdf(os.path.join(outPath, dynamic_hd5_filename), 'X')
 
     return X
@@ -338,6 +339,7 @@ def save_notes(notes, outPath=None, notes_h5_filename=None):
     # TODO(CUIs)
     # TODO This takes forever. At the very least add a progress bar.
 
+    @Language.component('sbd_component')
     def sbd_component(doc):
         for i, token in enumerate(doc[:-2]):
             # define sentence start if period + titlecase token
@@ -351,12 +353,107 @@ def save_notes(notes, outPath=None, notes_h5_filename=None):
     def fix_deid_tokens(text, processed_text):
         deid_regex  = r"\[\*\*.{0,15}.*?\*\*\]" 
         indexes = [m.span() for m in re.finditer(deid_regex,text,flags=re.IGNORECASE)]
-        for start,end in indexes:
-            processed_text.merge(start_idx=start,end_idx=end)
-        return processed_text
+        doc = processed_text
+        if len(indexes) > 0:
+            i = 0 # we will need to back up and do some i's again if splitting and then merging!
+            while i < len(indexes):
+                start, end = indexes[i]
+                span = doc.char_span(start, end, alignment_mode="strict")
+                # In theory we should only do one retokenization pass with all the indexes, but
+                # it doesn't appear possible to merge newly split subtokens in one pass--e.g.
+                # for this document: `['[**','deidtag','**]-[**','secondtag','**]']`, doc[2]
+                # would have to be split and pieces joined to doc[1] and doc[3], but `merge`
+                # does not accept subtoken tuples like `split` does!
+                merge_with_split = False
+                with doc.retokenize() as retokenizer:
+                    if span is not None: # with "strict" alignment, then we only need a merge...
+                        minilog.append(f"Merging!   {span}")
+                        retokenizer.merge(doc[span.start:span.end], attrs={"POS": "X", "DEP": "punct"})
+
+                        #fix cycles--brute force--there may be a much simpler/more efficient way...
+                        """
+                        ext_head = None
+                        ext_head_candidates = {t.head for t in span if t.head not in span}
+                        # if there are no external heads, internal cycles may still be a problem?
+                        #if len(ext_head_candidates) == 0:
+
+                        for ehc in ext_head_candidates:
+                            #ehc_ancestors_in_span = [t for t in ehc.ancestors if t in span]
+                            ehc_ancestors_in_span = []
+                            for t in ehc.ancestors:
+                                if t in span:
+                                    ehc_ancestors_in_span.append(t)
+                                    break
+                            
+                            if len(ehc_ancestors_in_span) == 0:
+                                ext_head = ehc
+                                #got external head!
+                                #print(f"  Got external head {ext_head} at {ext_head.idx}!")
+                                for t in span:
+                                    t.head = ehc # cycles be gone!
+                                continue
+                            else:
+                                print(f"    ehc {ehc.text} had internal heads {ehc_ancestors_in_span}!")
+                        """
+                        if len(minilog)>1:
+                            merge_with_split = True
+                            minilog = [f+"\n" for f in minilog]
+                            #print(f"{minilog}")
+                            """
+                            if ext_head is None:
+                                print(f"  Got no ext_head... {len(ext_head_candidates)=}")
+                                for token in span:
+                                    ancs = [].append(token.ancestors)
+                                    if ancs is not None and len(ancs) > len(span):
+                                        print(f"    internal cycle found: {ancs[:12]}...")
+                                        raise Exception("Cycle found before merge. Stopping.")
+                                        break
+                            else:
+                                print(f"  Got external head {ext_head} at {ext_head.idx}!")
+                            """
+                            #for token in span:
+                            #    print(f"  {token=} 2left={[t for t in span[0].lefts][:2]} ancestors={[ ''+a.text+'->'+a.head.text for a in token.ancestors][:10]} (at {span[0].idx}:{[a.idx for a in token.ancestors][:10]})")
+                        minilog = []
+                        i += 1 # Only move on to the next match in this case!
+                    else: # we have to do some splitting and come back again...
+                        span = doc.char_span(start, end, alignment_mode="expand")
+                        start_delta = start - span[0].idx # if >0, something is tacked on to the front.
+                        end_delta = (span[-1].idx + len(span[-1])) - end # - start_delta??
+                        #if start_delta > 0:
+                        #    print()
+                        #    print(f"{span} ({len(span)=})")
+                        #    print(f"{start_delta=} {span[0].idx=} {span[-1].idx=} {len(span[-1])=} {(span[-1].idx + len(span[-1]))=} {end=}")
+
+                        if start_delta > 0:
+                            new_tok_start = start_delta
+                            minilog.append(f"Chopping {start_delta} chars from START!  {[span[0].text[:new_tok_start], span[0].text[new_tok_start:]]}")
+                            retokenizer.split(
+                                span[0], 
+                                [span[0].text[:new_tok_start], span[0].text[new_tok_start:]], 
+                                #heads=[(span[0],1), span[1]],
+                                heads=[span[0].head, span[0].head],
+                                attrs={"POS": ["X","X"], "DEP": ["dep", "punct"]} )
+                        if end_delta > 0:
+                            new_tok_start = len(span[-1].text)-end_delta
+                            minilog.append(f"Chopping {end_delta} chars from END!    {[span[-1].text[:new_tok_start], span[-1].text[new_tok_start:]]}")
+                            #if span[-1].children is not None and len([].append(span[-1].children)) > 0:
+                            #    minilog[-1] += f" -- token has {len([].append(span[-1].children))} children"
+                            retokenizer.split(
+                                span[-1], 
+                                [span[-1].text[:new_tok_start], span[-1].text[new_tok_start:]], 
+                                #heads=[span[-2],(span[-1],0)],
+                                heads=[span[-1].head, span[-1].head],
+                                attrs={"POS": ["X","X"], "DEP": ["punct", "dep"]} )
+                        
+                        #print(f"WARN: Selected span \"{span}\" via \"expand\" alignment!")
+                        #FIXME: Will need to split off substrings from either end of the deid token into their own tokens
+                if merge_with_split:
+                    merge_with_split = False
+                    #print(f"Merge with split finished! ({i=})")
+        return doc
 
     nlp = spacy.load('en_core_web_sm') # Maybe try lg model?
-    nlp.add_pipe(sbd_component, before='parser')  # insert before the parser
+    nlp.add_pipe('sbd_component', before='parser')  # insert before the parser
     disabled = nlp.disable_pipes('ner')
 
     def process_sections_helper(section, note, processed_sections):
@@ -589,7 +686,7 @@ def save_outcome(
     print('Shape of Y : ', Y.shape)
 
     # SAVE AS NUMPY ARRAYS AND TEXT FILES
-    #np_Y = Y.as_matrix()
+    #np_Y = Y.to_numpy()
     #np.save(os.path.join(outPath, outcome_filename), np_Y)
 
     # Turn back into columns
@@ -683,7 +780,7 @@ def plot_variable_histograms(col_names, df):
         plt.plot([], label='Variance: {}'.format(format(var,'.2f')),
                  color='lightgray')
         plt.plot([], label='Skew: {}'.format(format(skew,'.2f')),
-                 color='light:gray')
+                 color='lightgray')
 
         # add title, labels etc.
         plt.title('{} measurements in ICU '.format(str(c)))
