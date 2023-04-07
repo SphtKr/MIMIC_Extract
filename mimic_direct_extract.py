@@ -14,11 +14,15 @@ import numpy.random as npr
 import spacy
 from spacy.language import Language
 # TODO(mmd): Upgrade to python 3 and use scispacy (requires python 3.6)
-import scispacy
+#import scispacy
+#spacy.require_gpu() 
 
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+
+#from tqdm import tqdm
+#tqdm.pandas()
 
 from datapackage_io_util import (
     load_datapackage_schema,
@@ -256,7 +260,8 @@ def save_numerics(
         X = apply_variable_limits(X, var_ranges, 'LEVEL2')
 
     group_item_cols = ['LEVEL2'] if group_by_level2 else ITEM_COLS
-    X = X.groupby(ID_COLS + group_item_cols + ['hours_in']).agg(['mean', 'std', 'count']) #FutureWarning: ['valueuom', 'dbsource', 'linksto', 'category', 'unitname'] did not aggregate successfully. If any error is raised this will raise in a future version of pandas. Drop these columns/ops to avoid this warning.
+    X = X.select_dtypes('number') #Fix for: FutureWarning: ['valueuom', 'dbsource', 'linksto', 'category', 'unitname'] did not aggregate successfully. If any error is raised this will raise in a future version of pandas. Drop these columns/ops to avoid this warning.
+    X = X.groupby(ID_COLS + group_item_cols + ['hours_in']).agg(['mean', 'std', 'count']) 
     X.columns = X.columns.droplevel(0)
     X.columns.names = ['Aggregation Function']
 
@@ -494,6 +499,7 @@ def save_notes(notes, outPath=None, notes_h5_filename=None):
             print('error', e)
             #raise e
 
+    #notes = notes.progress_apply(process_frame_text, axis=1)
     notes = notes.apply(process_frame_text, axis=1)
 
     if outPath is not None and notes_h5_filename is not None:
