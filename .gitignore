@@ -109,3 +109,7 @@ makejob
 
 # tags
 tags
+
+# Python virtual environments
+venv*
+.venv*
