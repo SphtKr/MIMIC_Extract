@@ -360,6 +360,7 @@ def save_notes(notes, outPath=None, notes_h5_filename=None):
         indexes = [m.span() for m in re.finditer(deid_regex,text,flags=re.IGNORECASE)]
         doc = processed_text
         if len(indexes) > 0:
+            minilog = []
             i = 0 # we will need to back up and do some i's again if splitting and then merging!
             while i < len(indexes):
                 start, end = indexes[i]
