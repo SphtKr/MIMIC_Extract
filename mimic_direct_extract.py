@@ -110,9 +110,9 @@ def continuous_outcome_processing(out_data, data, icustay_timediff):
     out_data['intime'] = out_data['icustay_id'].map(data['intime'].to_dict())
     out_data['outtime'] = out_data['icustay_id'].map(data['outtime'].to_dict())
     out_data['max_hours'] = out_data['icustay_id'].map(icustay_timediff)
-    out_data['starttime'] = out_data['starttime'] - out_data['intime']
+    out_data['starttime'] = pd.to_datetime(out_data['starttime']) - pd.to_datetime(out_data['intime'])
     out_data['starttime'] = out_data.starttime.apply(lambda x: x.days*24 + x.seconds//3600)
-    out_data['endtime'] = out_data['endtime'] - out_data['intime']
+    out_data['endtime'] = pd.to_datetime(out_data['endtime']) - pd.to_datetime(out_data['intime'])
     out_data['endtime'] = out_data.endtime.apply(lambda x: x.days*24 + x.seconds//3600)
     out_data = out_data.groupby(['icustay_id'])
 
@@ -612,7 +612,11 @@ def save_outcome(
         new_data = continuous_outcome_processing(new_data, data, icustay_timediff)
         new_data = new_data.apply(add_outcome_indicators)
         new_data.rename(columns={'on': c}, inplace=True)
-        new_data = new_data.reset_index()
+        if 'icustay_id' in new_data:
+            # This may only be applicable when starting from empty...better solution?
+            new_data = new_data.reset_index(drop=True)
+        else:
+            new_data = new_data.reset_index()
         # c may not be in Y if we are only extracting a subset of the population, in which c was never
         # performed.
         if not c in new_data:
