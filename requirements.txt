@@ -9,3 +9,4 @@ matplotlib
 nltk
 tables
 scikit-learn
+tqdm
