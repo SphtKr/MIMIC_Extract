@@ -21,8 +21,8 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-#from tqdm import tqdm
-#tqdm.pandas()
+from tqdm import tqdm
+tqdm.pandas()
 
 from datapackage_io_util import (
     load_datapackage_schema,
@@ -500,8 +500,7 @@ def save_notes(notes, outPath=None, notes_h5_filename=None):
             print('error', e)
             #raise e
 
-    #notes = notes.progress_apply(process_frame_text, axis=1)
-    notes = notes.apply(process_frame_text, axis=1)
+    notes = notes.progress_apply(process_frame_text, axis=1)
 
     if outPath is not None and notes_h5_filename is not None:
         notes.to_hdf(os.path.join(outPath, notes_h5_filename), 'notes')
