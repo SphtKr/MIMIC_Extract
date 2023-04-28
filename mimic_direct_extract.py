@@ -1,7 +1,7 @@
 from __future__ import print_function, division
 
 # MIMIC IIIv14 on postgres 9.4
-import os, psycopg2, re, sys, time, numpy as np, pandas as pd
+import os, re, sys, time, numpy as np, pandas as pd
 from sklearn import metrics
 from datetime import datetime
 from datetime import timedelta
@@ -979,12 +979,8 @@ if __name__ == '__main__':
         labitems_to_keep = set([ str(i) for i in labitems_to_keep ])
 
 
-        # TODO(mmd): Use querier, move to file
-        con = psycopg2.connect(**query_args)
-        cur = con.cursor()
-
+        
         print("  starting db query with %d subjects..." % (len(icuids_to_keep)))
-        cur.execute('SET search_path to ' + schema_name)
         query = \
         """
         select c.subject_id, i.hadm_id, c.icustay_id, c.charttime, c.itemid, c.value, valueuom
@@ -1007,7 +1003,7 @@ if __name__ == '__main__':
           and l.valuenum > 0 -- lab values cannot be 0 and cannot be negative
         ;
         """.format(icuids=','.join(icuids_to_keep), chitem=','.join(chartitems_to_keep), lbitem=','.join(labitems_to_keep))
-        X = pd.read_sql_query(query, con)
+        X = querier.query(query_string=query)
 
         itemids = set(X.itemid.astype(str))
 
@@ -1018,10 +1014,8 @@ if __name__ == '__main__':
         WHERE itemid in ({itemids})
         ;
         """.format(itemids=','.join(itemids))
-        I = pd.read_sql_query(query_d_items, con).set_index('itemid')
+        I = querier.query(query_string=query_d_items).set_index('itemid')
 
-        cur.close()
-        con.close()
         print("  db query finished after %.3f sec" % (time.time() - start_time))
         X = save_numerics(
             data, X, I, var_map, var_ranges, outPath, dynamic_filename, columns_filename, subjects_filename,
