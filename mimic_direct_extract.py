@@ -32,12 +32,15 @@ from datapackage_io_util import (
 )
 from heuristic_sentence_splitter import sent_tokenize_rules
 from mimic_querier import *
+from mimic_querier_duckdb import *
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 SQL_DIR = os.path.join(CURRENT_DIR, 'SQL_Queries')
+UTILS_DIR = os.path.join(CURRENT_DIR, 'utils')
 STATICS_QUERY_PATH = os.path.join(SQL_DIR, 'statics.sql')
 CODES_QUERY_PATH = os.path.join(SQL_DIR, 'codes.sql')
 NOTES_QUERY_PATH = os.path.join(SQL_DIR, 'notes.sql')
+NIVDURATIONS_PATH = os.path.join(UTILS_DIR, 'niv-durations.sql')
 
 # Output filenames
 static_filename = 'static_data.csv'
@@ -842,11 +845,15 @@ if __name__ == '__main__':
     ap.add_argument('--psql_dbname', type=str, default='mimic',
                     help='Postgres database name.')
     ap.add_argument('--psql_schema_name', type=str, default='public,mimiciii',
-                    help='Postgres database name.')
+                    help='Postgres schema name(s).')
     ap.add_argument('--psql_user', type=str, default=None,
                     help='Postgres user.')
     ap.add_argument('--psql_password', type=str, default=None,
                     help='Postgres password.')
+    ap.add_argument('--duckdb_database', type=str, default=None,
+                    help='Path to DuckDB data file (overrides all Postgres options)')
+    ap.add_argument('--duckdb_schema_name', type=str, default='mimiciii',
+                    help='DuckDB schema name')
     ap.add_argument('--no_group_by_level2', action='store_false', dest='group_by_level2', default=True,
                     help="Don't group by level2.")
     
@@ -907,14 +914,21 @@ if __name__ == '__main__':
         notes_hd5_filename = splitext(notes_hd5_filename)[0] + '_' + pop_size + splitext(notes_hd5_filename)[1]
         idx_hd5_filename = splitext(idx_hd5_filename)[0] + '_' + pop_size + splitext(idx_hd5_filename)[1]
 
-    dbname = args['psql_dbname']
-    schema_name = args['psql_schema_name']
-    query_args = {'dbname': dbname}
-    if args['psql_host'] is not None: query_args['host'] = args['psql_host']
-    if args['psql_user'] is not None: query_args['user'] = args['psql_user']
-    if args['psql_password'] is not None: query_args['password'] = args['psql_password']
+    if args['duckdb_database'] is not None:
+        dbname = args['duckdb_database']
+        schema_name = args['duckdb_schema_name']
+        query_args = {'database': dbname}
+        querier = MIMIC_Querier_DuckDB(query_args=query_args, schema_name=schema_name)
+        querier.ensure_view(NIVDURATIONS_PATH, 'nivdurations')
+    else:
+        dbname = args['psql_dbname']
+        schema_name = args['psql_schema_name']
+        query_args = {'dbname': dbname}
+        if args['psql_host'] is not None: query_args['host'] = args['psql_host']
+        if args['psql_user'] is not None: query_args['user'] = args['psql_user']
+        if args['psql_password'] is not None: query_args['password'] = args['psql_password']
 
-    querier = MIMIC_Querier(query_args=query_args, schema_name=schema_name)
+        querier = MIMIC_Querier(query_args=query_args, schema_name=schema_name)
 
     #############
     # Population extraction

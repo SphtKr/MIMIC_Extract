@@ -1,4 +1,6 @@
-import copy, psycopg2, pandas as pd
+#TODO: wrap this in try/except
+import psycopg2
+import copy, pandas as pd
 
 # TODO(mmd): Where should this go?
 # TODO(mmd): Rename
