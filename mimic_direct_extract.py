@@ -1,7 +1,7 @@
 from __future__ import print_function, division
 
 # MIMIC IIIv14 on postgres 9.4
-import os, psycopg2, re, sys, time, numpy as np, pandas as pd
+import os, re, sys, time, numpy as np, pandas as pd
 from sklearn import metrics
 from datetime import datetime
 from datetime import timedelta
@@ -12,12 +12,17 @@ import pickle as cPickle
 import numpy.random as npr
 
 import spacy
+from spacy.language import Language
 # TODO(mmd): Upgrade to python 3 and use scispacy (requires python 3.6)
-import scispacy
+#import scispacy
+#spacy.require_gpu() 
 
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+
+from tqdm import tqdm
+tqdm.pandas()
 
 from datapackage_io_util import (
     load_datapackage_schema,
@@ -27,12 +32,15 @@ from datapackage_io_util import (
 )
 from heuristic_sentence_splitter import sent_tokenize_rules
 from mimic_querier import *
+from mimic_querier_duckdb import *
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 SQL_DIR = os.path.join(CURRENT_DIR, 'SQL_Queries')
+UTILS_DIR = os.path.join(CURRENT_DIR, 'utils')
 STATICS_QUERY_PATH = os.path.join(SQL_DIR, 'statics.sql')
 CODES_QUERY_PATH = os.path.join(SQL_DIR, 'codes.sql')
 NOTES_QUERY_PATH = os.path.join(SQL_DIR, 'notes.sql')
+NIVDURATIONS_PATH = os.path.join(UTILS_DIR, 'niv-durations.sql')
 
 # Output filenames
 static_filename = 'static_data.csv'
@@ -105,9 +113,9 @@ def continuous_outcome_processing(out_data, data, icustay_timediff):
     out_data['intime'] = out_data['icustay_id'].map(data['intime'].to_dict())
     out_data['outtime'] = out_data['icustay_id'].map(data['outtime'].to_dict())
     out_data['max_hours'] = out_data['icustay_id'].map(icustay_timediff)
-    out_data['starttime'] = out_data['starttime'] - out_data['intime']
+    out_data['starttime'] = pd.to_datetime(out_data['starttime']) - pd.to_datetime(out_data['intime'])
     out_data['starttime'] = out_data.starttime.apply(lambda x: x.days*24 + x.seconds//3600)
-    out_data['endtime'] = out_data['endtime'] - out_data['intime']
+    out_data['endtime'] = pd.to_datetime(out_data['endtime']) - pd.to_datetime(out_data['intime'])
     out_data['endtime'] = out_data.endtime.apply(lambda x: x.days*24 + x.seconds//3600)
     out_data = out_data.groupby(['icustay_id'])
 
@@ -146,8 +154,8 @@ def save_pop(
 def get_variable_mapping(mimic_mapping_filename):
     # Read in the second level mapping of the itemids
     var_map = pd.read_csv(mimic_mapping_filename, index_col=None)
-    var_map = var_map.ix[(var_map['LEVEL2'] != '') & (var_map['COUNT']>0)]
-    var_map = var_map.ix[(var_map['STATUS'] == 'ready')]
+    var_map = var_map.loc[(var_map['LEVEL2'] != '') & (var_map['COUNT']>0)]
+    var_map = var_map.loc[(var_map['STATUS'] == 'ready')]
     var_map['ITEMID'] = var_map['ITEMID'].astype(int)
 
     return var_map
@@ -215,7 +223,7 @@ def range_unnest(df, col, out_col_name=None, reset_index=False):
     if out_col_name is None: out_col_name = col
 
     col_flat = pd.DataFrame(
-        [[i, x] for i, y in df[col].iteritems() for x in range(y+1)],
+        [[i, x] for i, y in df[col].items() for x in range(y+1)],
         columns=[df.index.names[0], out_col_name]
     )
 
@@ -231,12 +239,12 @@ def save_numerics(
 
     var_map = var_map[
         ['LEVEL2', 'ITEMID', 'LEVEL1']
-    ].rename_axis(
+    ].rename( # Less sure about this change
         {'LEVEL2': 'LEVEL2', 'LEVEL1': 'LEVEL1', 'ITEMID': 'itemid'}, axis=1
     ).set_index('itemid')
 
     X['value'] = pd.to_numeric(X['value'], 'coerce')
-    X.astype({k: int for k in ID_COLS}, inplace=True)
+    X = X.astype({k: int for k in ID_COLS})
 
     to_hours = lambda x: max(0, x.days*24 + x.seconds // 3600)
 
@@ -255,7 +263,8 @@ def save_numerics(
         X = apply_variable_limits(X, var_ranges, 'LEVEL2')
 
     group_item_cols = ['LEVEL2'] if group_by_level2 else ITEM_COLS
-    X = X.groupby(ID_COLS + group_item_cols + ['hours_in']).agg(['mean', 'std', 'count'])
+    X = X.select_dtypes('number') #Fix for: FutureWarning: ['valueuom', 'dbsource', 'linksto', 'category', 'unitname'] did not aggregate successfully. If any error is raised this will raise in a future version of pandas. Drop these columns/ops to avoid this warning.
+    X = X.groupby(ID_COLS + group_item_cols + ['hours_in']).agg(['mean', 'std', 'count']) 
     X.columns = X.columns.droplevel(0)
     X.columns.names = ['Aggregation Function']
 
@@ -300,9 +309,9 @@ def save_numerics(
 
     # Get the max time for each of the subjects so we can reconstruct!
     if subjects_filename is not None:
-        np.save(os.path.join(outPath, subjects_filename), data['subject_id'].as_matrix())
+        np.save(os.path.join(outPath, subjects_filename), data['subject_id'].to_numpy())
     if times_filename is not None: 
-        np.save(os.path.join(outPath, times_filename), data['max_hours'].as_matrix())
+        np.save(os.path.join(outPath, times_filename), data['max_hours'].to_numpy())
 
     #fix nan in count to be zero
     idx = pd.IndexSlice
@@ -321,7 +330,7 @@ def save_numerics(
     X = X.drop(columns = drop_col)
 
     ########
-    if dynamic_filename is not None: np.save(os.path.join(outPath, dynamic_filename), X.as_matrix())
+    if dynamic_filename is not None: np.save(os.path.join(outPath, dynamic_filename), X.to_numpy())
     if dynamic_hd5_filename is not None: X.to_hdf(os.path.join(outPath, dynamic_hd5_filename), 'X')
 
     return X
@@ -338,6 +347,7 @@ def save_notes(notes, outPath=None, notes_h5_filename=None):
     # TODO(CUIs)
     # TODO This takes forever. At the very least add a progress bar.
 
+    @Language.component('sbd_component')
     def sbd_component(doc):
         for i, token in enumerate(doc[:-2]):
             # define sentence start if period + titlecase token
@@ -351,12 +361,108 @@ def save_notes(notes, outPath=None, notes_h5_filename=None):
     def fix_deid_tokens(text, processed_text):
         deid_regex  = r"\[\*\*.{0,15}.*?\*\*\]" 
         indexes = [m.span() for m in re.finditer(deid_regex,text,flags=re.IGNORECASE)]
-        for start,end in indexes:
-            processed_text.merge(start_idx=start,end_idx=end)
-        return processed_text
+        doc = processed_text
+        if len(indexes) > 0:
+            minilog = []
+            i = 0 # we will need to back up and do some i's again if splitting and then merging!
+            while i < len(indexes):
+                start, end = indexes[i]
+                span = doc.char_span(start, end, alignment_mode="strict")
+                # In theory we should only do one retokenization pass with all the indexes, but
+                # it doesn't appear possible to merge newly split subtokens in one pass--e.g.
+                # for this document: `['[**','deidtag','**]-[**','secondtag','**]']`, doc[2]
+                # would have to be split and pieces joined to doc[1] and doc[3], but `merge`
+                # does not accept subtoken tuples like `split` does!
+                merge_with_split = False
+                with doc.retokenize() as retokenizer:
+                    if span is not None: # with "strict" alignment, then we only need a merge...
+                        minilog.append(f"Merging!   {span}")
+                        retokenizer.merge(doc[span.start:span.end], attrs={"POS": "X", "DEP": "punct"})
+
+                        #fix cycles--brute force--there may be a much simpler/more efficient way...
+                        """
+                        ext_head = None
+                        ext_head_candidates = {t.head for t in span if t.head not in span}
+                        # if there are no external heads, internal cycles may still be a problem?
+                        #if len(ext_head_candidates) == 0:
+
+                        for ehc in ext_head_candidates:
+                            #ehc_ancestors_in_span = [t for t in ehc.ancestors if t in span]
+                            ehc_ancestors_in_span = []
+                            for t in ehc.ancestors:
+                                if t in span:
+                                    ehc_ancestors_in_span.append(t)
+                                    break
+                            
+                            if len(ehc_ancestors_in_span) == 0:
+                                ext_head = ehc
+                                #got external head!
+                                #print(f"  Got external head {ext_head} at {ext_head.idx}!")
+                                for t in span:
+                                    t.head = ehc # cycles be gone!
+                                continue
+                            else:
+                                print(f"    ehc {ehc.text} had internal heads {ehc_ancestors_in_span}!")
+                        """
+                        if len(minilog)>1:
+                            merge_with_split = True
+                            minilog = [f+"\n" for f in minilog]
+                            #print(f"{minilog}")
+                            """
+                            if ext_head is None:
+                                print(f"  Got no ext_head... {len(ext_head_candidates)=}")
+                                for token in span:
+                                    ancs = [].append(token.ancestors)
+                                    if ancs is not None and len(ancs) > len(span):
+                                        print(f"    internal cycle found: {ancs[:12]}...")
+                                        raise Exception("Cycle found before merge. Stopping.")
+                                        break
+                            else:
+                                print(f"  Got external head {ext_head} at {ext_head.idx}!")
+                            """
+                            #for token in span:
+                            #    print(f"  {token=} 2left={[t for t in span[0].lefts][:2]} ancestors={[ ''+a.text+'->'+a.head.text for a in token.ancestors][:10]} (at {span[0].idx}:{[a.idx for a in token.ancestors][:10]})")
+                        minilog = []
+                        i += 1 # Only move on to the next match in this case!
+                    else: # we have to do some splitting and come back again...
+                        span = doc.char_span(start, end, alignment_mode="expand")
+                        start_delta = start - span[0].idx # if >0, something is tacked on to the front.
+                        end_delta = (span[-1].idx + len(span[-1])) - end # - start_delta??
+                        #if start_delta > 0:
+                        #    print()
+                        #    print(f"{span} ({len(span)=})")
+                        #    print(f"{start_delta=} {span[0].idx=} {span[-1].idx=} {len(span[-1])=} {(span[-1].idx + len(span[-1]))=} {end=}")
+
+                        if start_delta > 0:
+                            new_tok_start = start_delta
+                            minilog.append(f"Chopping {start_delta} chars from START!  {[span[0].text[:new_tok_start], span[0].text[new_tok_start:]]}")
+                            retokenizer.split(
+                                span[0], 
+                                [span[0].text[:new_tok_start], span[0].text[new_tok_start:]], 
+                                #heads=[(span[0],1), span[1]],
+                                heads=[span[0].head, span[0].head],
+                                attrs={"POS": ["X","X"], "DEP": ["dep", "punct"]} )
+                        if end_delta > 0:
+                            new_tok_start = len(span[-1].text)-end_delta
+                            minilog.append(f"Chopping {end_delta} chars from END!    {[span[-1].text[:new_tok_start], span[-1].text[new_tok_start:]]}")
+                            #if span[-1].children is not None and len([].append(span[-1].children)) > 0:
+                            #    minilog[-1] += f" -- token has {len([].append(span[-1].children))} children"
+                            retokenizer.split(
+                                span[-1], 
+                                [span[-1].text[:new_tok_start], span[-1].text[new_tok_start:]], 
+                                #heads=[span[-2],(span[-1],0)],
+                                heads=[span[-1].head, span[-1].head],
+                                attrs={"POS": ["X","X"], "DEP": ["punct", "dep"]} )
+                        
+                        #print(f"WARN: Selected span \"{span}\" via \"expand\" alignment!")
+                        #FIXME: Will need to split off substrings from either end of the deid token into their own tokens
+                if merge_with_split:
+                    merge_with_split = False
+                    #print(f"Merge with split finished! ({i=})")
+        return doc
 
     nlp = spacy.load('en_core_web_sm') # Maybe try lg model?
-    nlp.add_pipe(sbd_component, before='parser')  # insert before the parser
+    nlp.add_pipe('sbd_component', before='parser')  # insert before the parser
     disabled = nlp.disable_pipes('ner')
 
     def process_sections_helper(section, note, processed_sections):
@@ -397,7 +503,7 @@ def save_notes(notes, outPath=None, notes_h5_filename=None):
             print('error', e)
             #raise e
 
-    notes = notes.apply(process_frame_text, axis=1)
+    notes = notes.progress_apply(process_frame_text, axis=1)
 
     if outPath is not None and notes_h5_filename is not None:
         notes.to_hdf(os.path.join(outPath, notes_h5_filename), 'notes')
@@ -508,7 +614,11 @@ def save_outcome(
         new_data = continuous_outcome_processing(new_data, data, icustay_timediff)
         new_data = new_data.apply(add_outcome_indicators)
         new_data.rename(columns={'on': c}, inplace=True)
-        new_data = new_data.reset_index()
+        if 'icustay_id' in new_data:
+            # This may only be applicable when starting from empty...better solution?
+            new_data = new_data.reset_index(drop=True)
+        else:
+            new_data = new_data.reset_index()
         # c may not be in Y if we are only extracting a subset of the population, in which c was never
         # performed.
         if not c in new_data:
@@ -589,7 +699,7 @@ def save_outcome(
     print('Shape of Y : ', Y.shape)
 
     # SAVE AS NUMPY ARRAYS AND TEXT FILES
-    #np_Y = Y.as_matrix()
+    #np_Y = Y.to_numpy()
     #np.save(os.path.join(outPath, outcome_filename), np_Y)
 
     # Turn back into columns
@@ -683,7 +793,7 @@ def plot_variable_histograms(col_names, df):
         plt.plot([], label='Variance: {}'.format(format(var,'.2f')),
                  color='lightgray')
         plt.plot([], label='Skew: {}'.format(format(skew,'.2f')),
-                 color='light:gray')
+                 color='lightgray')
 
         # add title, labels etc.
         plt.title('{} measurements in ICU '.format(str(c)))
@@ -735,11 +845,15 @@ if __name__ == '__main__':
     ap.add_argument('--psql_dbname', type=str, default='mimic',
                     help='Postgres database name.')
     ap.add_argument('--psql_schema_name', type=str, default='public,mimiciii',
-                    help='Postgres database name.')
+                    help='Postgres schema name(s).')
     ap.add_argument('--psql_user', type=str, default=None,
                     help='Postgres user.')
     ap.add_argument('--psql_password', type=str, default=None,
                     help='Postgres password.')
+    ap.add_argument('--duckdb_database', type=str, default=None,
+                    help='Path to DuckDB data file (overrides all Postgres options)')
+    ap.add_argument('--duckdb_schema_name', type=str, default='mimiciii',
+                    help='DuckDB schema name')
     ap.add_argument('--no_group_by_level2', action='store_false', dest='group_by_level2', default=True,
                     help="Don't group by level2.")
     
@@ -800,14 +914,21 @@ if __name__ == '__main__':
         notes_hd5_filename = splitext(notes_hd5_filename)[0] + '_' + pop_size + splitext(notes_hd5_filename)[1]
         idx_hd5_filename = splitext(idx_hd5_filename)[0] + '_' + pop_size + splitext(idx_hd5_filename)[1]
 
-    dbname = args['psql_dbname']
-    schema_name = args['psql_schema_name']
-    query_args = {'dbname': dbname}
-    if args['psql_host'] is not None: query_args['host'] = args['psql_host']
-    if args['psql_user'] is not None: query_args['user'] = args['psql_user']
-    if args['psql_password'] is not None: query_args['password'] = args['psql_password']
+    if args['duckdb_database'] is not None:
+        dbname = args['duckdb_database']
+        schema_name = args['duckdb_schema_name']
+        query_args = {'database': dbname}
+        querier = MIMIC_Querier_DuckDB(query_args=query_args, schema_name=schema_name)
+        querier.ensure_view(NIVDURATIONS_PATH, 'nivdurations')
+    else:
+        dbname = args['psql_dbname']
+        schema_name = args['psql_schema_name']
+        query_args = {'dbname': dbname}
+        if args['psql_host'] is not None: query_args['host'] = args['psql_host']
+        if args['psql_user'] is not None: query_args['user'] = args['psql_user']
+        if args['psql_password'] is not None: query_args['password'] = args['psql_password']
 
-    querier = MIMIC_Querier(query_args=query_args, schema_name=schema_name)
+        querier = MIMIC_Querier(query_args=query_args, schema_name=schema_name)
 
     #############
     # Population extraction
@@ -872,12 +993,8 @@ if __name__ == '__main__':
         labitems_to_keep = set([ str(i) for i in labitems_to_keep ])
 
 
-        # TODO(mmd): Use querier, move to file
-        con = psycopg2.connect(**query_args)
-        cur = con.cursor()
-
+        
         print("  starting db query with %d subjects..." % (len(icuids_to_keep)))
-        cur.execute('SET search_path to ' + schema_name)
         query = \
         """
         select c.subject_id, i.hadm_id, c.icustay_id, c.charttime, c.itemid, c.value, valueuom
@@ -900,7 +1017,7 @@ if __name__ == '__main__':
           and l.valuenum > 0 -- lab values cannot be 0 and cannot be negative
         ;
         """.format(icuids=','.join(icuids_to_keep), chitem=','.join(chartitems_to_keep), lbitem=','.join(labitems_to_keep))
-        X = pd.read_sql_query(query, con)
+        X = querier.query(query_string=query)
 
         itemids = set(X.itemid.astype(str))
 
@@ -911,10 +1028,8 @@ if __name__ == '__main__':
         WHERE itemid in ({itemids})
         ;
         """.format(itemids=','.join(itemids))
-        I = pd.read_sql_query(query_d_items, con).set_index('itemid')
+        I = querier.query(query_string=query_d_items).set_index('itemid')
 
-        cur.close()
-        con.close()
         print("  db query finished after %.3f sec" % (time.time() - start_time))
         X = save_numerics(
             data, X, I, var_map, var_ranges, outPath, dynamic_filename, columns_filename, subjects_filename,
